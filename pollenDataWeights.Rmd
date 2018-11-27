@@ -1,0 +1,124 @@
+---
+title: "Real data analysis Silverman et al. (2018), http://dx.doi.org/10.1101/477794"
+output: html_notebook
+author: "Koen Van den Berge"
+---
+
+# Load data, and estimate weights with ZINB-WaVE
+
+```{r}
+library(scRNAseq)
+library(zinbwave)
+library(tidyverse)
+library(xtable)
+library(ggridges)
+library(BiocParallel)
+library(doParallel)
+NCORES <- 2
+registerDoParallel(NCORES)
+register(DoparParam())
+
+# Preprocess and Run Model ------------------------------------------------
+
+data("fluidigm")
+
+# Remove lowly expressed genes as in vignette
+filter <- rowSums(assay(fluidigm)>5)>5
+table(filter)
+fluidigm <- fluidigm[filter,]
+
+# Take 100 most variables genes
+assay(fluidigm) %>% log1p %>% rowVars -> vars
+names(vars) <- rownames(fluidigm)
+vars <- sort(vars, decreasing = TRUE)
+head(vars)
+fluidigm <- fluidigm[names(vars)[1:100],]
+
+# just take biocondition
+fluidigm <- fluidigm[,colData(fluidigm)$Biological_Condition %in% c("NPC" , "GW21")]
+x <- colData(fluidigm)$Biological_Condition
+
+#methods(class=class(fitZI))
+fitZI <- zinbFit(fluidigm, X="~Biological_Condition + Coverage_Type")
+weightsZinbwave <- computeObservationalWeights(fitZI,assays(fluidigm)[[1]])
+fitNZI <- zinbFit(fluidigm, X="~Biological_Condition + Coverage_Type",
+                  epsilon_min_logit=100000000000000)
+```
+
+# Fitting ZINB using EM-algorithm
+
+zingeR (https://www.biorxiv.org/content/early/2017/06/30/157982) is another method that fits ZINB models. Whereas ZINB-WaVE uses penalized likelihood estimation, zingeR adopts the EM-algorithm to fit the ZINB models.
+zingeR uses the sequencing depth of the cell as co-data to aid with identifiability and identify excess zeros.
+
+```{r}
+## weights with zingeR
+cond <- colData(fluidigm)$Biological_Condition
+cov <- colData(fluidigm)$Coverage_Type
+library(zingeR)
+counts <- assays(fluidigm)[[1]]
+weightsZinger <- zeroWeightsLS(counts, design=model.matrix(~cond+cov), verbose=FALSE)
+
+par(mfrow=c(1,2))
+hist(weightsZinbwave[counts==0], main="ZINB-WaVE weights for zeros", xlab="Weight (Posterior probability on count component in a ZINB model)", cex.lab=2/3)
+hist(weightsZinger[counts==0], main="zingeR weights for zeros", xlab="Weight (Posterior probability on count component in a ZINB model)", cex.lab=2/3)
+```
+
+Note that ZINB-WaVE and zingeR give different results.
+It is unclear which model provides the best fit to the data.
+
+Let's look at the SHISA2 gene, which was identified as a gene where results are very different because of accounting for zero inflation.
+
+```{r}
+par(mfrow=c(1,2))
+hist(weightsZinger["SHISA2",], main="zingeR weights for SHISA2", xlab="Weight (Posterior probability on count component in a ZINB model)", xlim=c(0,1), breaks=seq(0,1,by=.05), cex.lab=1/2)
+hist(weightsZinbwave[rownames(counts)%in%"SHISA2",], main="ZINB-WaVE weights for SHISA2", xlab="Weight (Posterior probability on count component in a ZINB model)", xlim=c(0,1), breaks=seq(0,1,by=.05), cex.lab=1/2)
+```
+
+
+ZINB-WaVE identifies some zeros as excess zeros, and some zeros as NB zeros.
+zingeR identifies all zeros as likely to belong to the NB component of the ZINB mixture distribution.
+
+Does the fold-change still differ substantially when accounting for ZI with zingeR?
+
+```{r}
+## ZI analysis
+library(edgeR)
+d <- DGEList(counts)
+d <- calcNormFactors(d)
+d$weights <- weightsZinger
+design <- model.matrix(~cond+cov)
+d <- estimateDisp(d,design)
+fitZI <- glmFit(d,design)
+lrtZI <- glmLRT(fitZI,coef=2)
+
+## NB analysis
+d <- DGEList(counts)
+d <- calcNormFactors(d)
+design <- model.matrix(~cond+cov)
+d <- estimateDisp(d,design)
+fitNB <- glmFit(d,design)
+lrtNB <- glmLRT(fitNB,coef=2)
+
+
+fitZI$coefficients["SHISA2",]
+fitNB$coefficients["SHISA2",]
+```
+
+No, fold-changes look pretty similar now.
+
+How many fold-changes are switching signs? 
+
+```{r}
+switchSign <- !(sign(fitZI$coefficients[,2]) == sign(fitNB$coefficients[,2]))
+mean(switchSign)
+switchSignId <- which(switchSign)
+```
+
+5 out of 100 genes switch signs in log-fold-change.
+A volcano plot shows that these are genes that had very low fold-changes in the NB model.
+
+```{r}
+plot(x=log2(exp(fitNB$coefficients[,2])), y=-log10(lrtNB$table$PValue), col=(1:2)[switchSign+1], pch=16, cex=1/2, xlab="log2 fold-change", ylab="-log10 p-value")
+legend("topleft",c("did not switch","switched sign"), col=1:2, pch=16, bty='n')
+```
+
