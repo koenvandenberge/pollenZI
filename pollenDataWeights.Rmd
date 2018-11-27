@@ -64,9 +64,11 @@ hist(weightsZinger[counts==0], main="zingeR weights for zeros", xlab="Weight (Po
 ```
 
 Note that ZINB-WaVE and zingeR give different results.
-It is unclear which model provides the best fit to the data.
+It would require some work to assess goodness of fit, so it is unclear which model provides the best fit to the data.
 
-Let's look at the SHISA2 gene, which was identified as a gene where results are very different because of accounting for zero inflation.
+# Assess effect of ZI
+
+Let's look at the SHISA2 gene, which was identified as a gene where results are very different when accounting for zero inflation in Silverman et al. (2018).
 
 ```{r}
 par(mfrow=c(1,2))
@@ -106,7 +108,7 @@ fitNB$coefficients["SHISA2",]
 
 No, fold-changes look pretty similar now.
 
-How many fold-changes are switching signs? 
+How many fold-changes are switching signs when accounting for ZI, versus the NB model? 
 
 ```{r}
 switchSign <- !(sign(fitZI$coefficients[,2]) == sign(fitNB$coefficients[,2]))
